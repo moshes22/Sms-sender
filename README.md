@@ -5,7 +5,7 @@ A clean mobile-first platform for managing contacts and sending bulk SMS campaig
 ## Features
 
 - Contacts tab with manual entry
-- CSV/TSV contact upload with `name` and `phone` column support
+- CSV, TSV, XLS, and XLSX contact upload with `name` and `phone` column support
 - Local contact persistence in the browser
 - Send tab with a message composer and recipient count
 - Server endpoint ready for Twilio SMS delivery

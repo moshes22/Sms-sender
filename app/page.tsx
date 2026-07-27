@@ -59,6 +59,41 @@ function parseDelimited(text: string) {
   });
 }
 
+function contactsFromRows(rows: unknown[][]) {
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const firstCells = rows[0].map((cell) => String(cell ?? "").trim().toLowerCase());
+  const hasHeader =
+    firstCells.some((cell) => ["name", "first name", "full name"].includes(cell)) ||
+    firstCells.some((cell) => ["phone", "mobile", "number", "phone number"].includes(cell));
+  const phoneIndex = Math.max(
+    firstCells.findIndex((cell) => ["phone", "mobile", "number", "phone number"].includes(cell)),
+    0,
+  );
+  const nameIndex = firstCells.findIndex((cell) =>
+    ["name", "first name", "full name"].includes(cell),
+  );
+
+  return rows.slice(hasHeader ? 1 : 0).flatMap((row, index) => {
+    const phone = normalizePhone(String(row[phoneIndex] ?? row[0] ?? ""));
+
+    if (!phone) {
+      return [];
+    }
+
+    return {
+      id: `${Date.now()}-sheet-${index}-${phone}`,
+      name:
+        nameIndex >= 0
+          ? String(row[nameIndex] ?? "").trim() || "Untitled contact"
+          : String(row[1] ?? "").trim() || "Untitled contact",
+      phone,
+    };
+  });
+}
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState<"contacts" | "send">("contacts");
   const [contacts, setContacts] = useState<Contact[]>(sampleContacts);
@@ -129,7 +164,13 @@ export default function Home() {
 
     const extension = file.name.split(".").pop()?.toLowerCase();
     if (extension === "xlsx" || extension === "xls") {
-      setNotice("For now, export Excel sheets as CSV or paste Excel rows into the upload file.");
+      const XLSX = await import("xlsx");
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json<unknown[]>(firstSheet, { header: 1 });
+      const imported = contactsFromRows(rows);
+      addContacts(imported);
+      setNotice(`${imported.length} contacts imported.`);
       event.target.value = "";
       return;
     }
