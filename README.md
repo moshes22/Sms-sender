@@ -8,6 +8,7 @@ A clean mobile-first platform for managing contacts and sending bulk SMS campaig
 - CSV, TSV, XLS, and XLSX contact upload with `name` and `phone` column support
 - Local contact persistence in the browser
 - Send tab with a message composer and recipient count
+- Tracking tab with delivery status, failed-recipient filtering, and resend-to-failed
 - Server endpoint ready for Twilio SMS delivery
 
 ## SMS Provider Setup
@@ -21,6 +22,10 @@ TWILIO_FROM_NUMBER=+12125550123
 ```
 
 Without those values, the app will prevent live sending and show a provider configuration message.
+
+## Delivery and Read Tracking
+
+SMS providers can report delivery states such as queued, sent, delivered, and failed when delivery callbacks are configured. Regular carrier SMS does not provide dependable read receipts, so the app marks read status as unavailable instead of pretending it can detect opens.
 
 ## Development
 

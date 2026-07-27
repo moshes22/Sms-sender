@@ -8,7 +8,24 @@ type Contact = {
   phone: string;
 };
 
+type DeliveryStatus = "queued" | "sent" | "delivered" | "failed";
+
+type MessageResult = Contact & {
+  status: DeliveryStatus;
+  providerId?: string;
+  error?: string;
+  readStatus: "not_supported";
+};
+
+type Campaign = {
+  id: string;
+  message: string;
+  createdAt: string;
+  results: MessageResult[];
+};
+
 type SendState = "idle" | "sending" | "sent" | "error";
+type Tab = "contacts" | "send" | "tracking";
 
 const sampleContacts: Contact[] = [
   { id: "sample-1", name: "Ari Lane", phone: "+12125550104" },
@@ -17,6 +34,18 @@ const sampleContacts: Contact[] = [
 
 function normalizePhone(value: string) {
   return value.replace(/[^\d+]/g, "").trim();
+}
+
+function campaignCounts(campaigns: Campaign[]) {
+  const latest = campaigns[0];
+  const results = latest?.results ?? [];
+
+  return {
+    total: results.length,
+    failed: results.filter((result) => result.status === "failed").length,
+    delivered: results.filter((result) => result.status === "delivered").length,
+    queued: results.filter((result) => result.status === "queued" || result.status === "sent").length,
+  };
 }
 
 function parseDelimited(text: string) {
@@ -34,7 +63,6 @@ function parseDelimited(text: string) {
   const hasHeader =
     firstCells.some((cell) => ["name", "first name", "full name"].includes(cell)) ||
     firstCells.some((cell) => ["phone", "mobile", "number", "phone number"].includes(cell));
-
   const phoneIndex = Math.max(
     firstCells.findIndex((cell) => ["phone", "mobile", "number", "phone number"].includes(cell)),
     0,
@@ -94,9 +122,23 @@ function contactsFromRows(rows: unknown[][]) {
   });
 }
 
+function statusTone(status: DeliveryStatus) {
+  if (status === "failed") {
+    return "border-[#ff6b8a]/30 bg-[#ff6b8a]/10 text-[#ff9bb0]";
+  }
+
+  if (status === "delivered") {
+    return "border-[#42f5c8]/30 bg-[#42f5c8]/10 text-[#9dffe8]";
+  }
+
+  return "border-white/10 bg-white/10 text-white/65";
+}
+
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<"contacts" | "send">("contacts");
+  const [activeTab, setActiveTab] = useState<Tab>("contacts");
   const [contacts, setContacts] = useState<Contact[]>(sampleContacts);
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [statusFilter, setStatusFilter] = useState<"all" | "failed">("all");
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [message, setMessage] = useState("");
@@ -104,9 +146,15 @@ export default function Home() {
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
-    const saved = window.localStorage.getItem("sms-sender-contacts");
-    if (saved) {
-      setContacts(JSON.parse(saved));
+    const savedContacts = window.localStorage.getItem("sms-sender-contacts");
+    const savedCampaigns = window.localStorage.getItem("sms-sender-campaigns");
+
+    if (savedContacts) {
+      setContacts(JSON.parse(savedContacts));
+    }
+
+    if (savedCampaigns) {
+      setCampaigns(JSON.parse(savedCampaigns));
     }
   }, []);
 
@@ -114,10 +162,20 @@ export default function Home() {
     window.localStorage.setItem("sms-sender-contacts", JSON.stringify(contacts));
   }, [contacts]);
 
+  useEffect(() => {
+    window.localStorage.setItem("sms-sender-campaigns", JSON.stringify(campaigns));
+  }, [campaigns]);
+
   const validContacts = useMemo(
     () => contacts.filter((contact) => normalizePhone(contact.phone).length >= 8),
     [contacts],
   );
+  const counts = campaignCounts(campaigns);
+  const latestCampaign = campaigns[0];
+  const visibleResults = (latestCampaign?.results ?? []).filter(
+    (result) => statusFilter === "all" || result.status === "failed",
+  );
+  const failedContacts = latestCampaign?.results.filter((result) => result.status === "failed") ?? [];
 
   function addContacts(nextContacts: Contact[]) {
     setContacts((current) => {
@@ -181,13 +239,13 @@ export default function Home() {
     event.target.value = "";
   }
 
-  async function sendBulkMessage() {
-    if (!message.trim()) {
+  async function sendToRecipients(recipients: Contact[], text: string, resend = false) {
+    if (!text.trim()) {
       setNotice("Write a message before sending.");
       return;
     }
 
-    if (validContacts.length === 0) {
+    if (recipients.length === 0) {
       setNotice("Add at least one valid contact.");
       return;
     }
@@ -199,11 +257,34 @@ export default function Home() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        message,
-        contacts: validContacts.map(({ name, phone }) => ({ name, phone })),
+        message: text,
+        contacts: recipients.map(({ name, phone }) => ({ name, phone })),
       }),
     });
     const result = await response.json();
+    const results: MessageResult[] =
+      result.results?.map((entry: MessageResult, index: number) => ({
+        id: `${Date.now()}-${index}-${entry.phone}`,
+        name: entry.name,
+        phone: entry.phone,
+        status: entry.status,
+        providerId: entry.providerId,
+        error: entry.error,
+        readStatus: "not_supported",
+      })) ?? [];
+
+    if (results.length > 0) {
+      setCampaigns((current) => [
+        {
+          id: `${Date.now()}`,
+          message: text,
+          createdAt: new Date().toISOString(),
+          results,
+        },
+        ...current,
+      ]);
+      setActiveTab("tracking");
+    }
 
     if (!response.ok) {
       setSendState("error");
@@ -212,7 +293,24 @@ export default function Home() {
     }
 
     setSendState("sent");
-    setNotice(`Queued ${result.sent} messages.`);
+    setNotice(
+      resend
+        ? `Resent to ${result.sent} failed recipients.`
+        : `Queued ${result.sent} messages. Watch status in Tracking.`,
+    );
+  }
+
+  function sendBulkMessage() {
+    void sendToRecipients(validContacts, message);
+  }
+
+  function resendFailed() {
+    if (!latestCampaign || failedContacts.length === 0) {
+      setNotice("There are no failed recipients to resend.");
+      return;
+    }
+
+    void sendToRecipients(failedContacts, latestCampaign.message, true);
   }
 
   return (
@@ -233,25 +331,23 @@ export default function Home() {
           </div>
         </header>
 
-        <nav className="mb-5 grid grid-cols-2 rounded-full border border-white/10 bg-white/5 p-1">
-          <button
-            className={`rounded-full px-4 py-3 text-sm font-semibold transition ${
-              activeTab === "contacts" ? "bg-white text-black" : "text-white/65"
-            }`}
-            onClick={() => setActiveTab("contacts")}
-            type="button"
-          >
-            Contacts
-          </button>
-          <button
-            className={`rounded-full px-4 py-3 text-sm font-semibold transition ${
-              activeTab === "send" ? "bg-[#42f5c8] text-black" : "text-white/65"
-            }`}
-            onClick={() => setActiveTab("send")}
-            type="button"
-          >
-            Send
-          </button>
+        <nav className="mb-5 grid grid-cols-3 rounded-full border border-white/10 bg-white/5 p-1">
+          {(["contacts", "send", "tracking"] as Tab[]).map((tab) => (
+            <button
+              className={`rounded-full px-2 py-3 text-sm font-semibold capitalize transition ${
+                activeTab === tab
+                  ? tab === "send"
+                    ? "bg-[#42f5c8] text-black"
+                    : "bg-white text-black"
+                  : "text-white/65"
+              }`}
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              type="button"
+            >
+              {tab}
+            </button>
+          ))}
         </nav>
 
         {notice ? (
@@ -338,7 +434,9 @@ export default function Home() {
               ))}
             </div>
           </div>
-        ) : (
+        ) : null}
+
+        {activeTab === "send" ? (
           <div className="flex flex-1 flex-col">
             <div className="mb-4 rounded-lg border border-white/10 bg-white/[0.06] p-4">
               <label className="mb-3 block text-sm font-semibold text-white/65">
@@ -358,7 +456,7 @@ export default function Home() {
             </div>
 
             <div className="mb-5 rounded-md border border-white/10 bg-black/25 px-4 py-3 text-xs leading-5 text-white/50">
-              Send only to people who opted in. Provider credentials are required before live SMS can leave the app.
+              Delivery can be tracked through the SMS provider. Regular SMS does not provide reliable read receipts.
             </div>
 
             <button
@@ -370,7 +468,92 @@ export default function Home() {
               {sendState === "sending" ? "Sending..." : "Send to All Contacts"}
             </button>
           </div>
-        )}
+        ) : null}
+
+        {activeTab === "tracking" ? (
+          <div className="flex flex-1 flex-col gap-4">
+            <div className="grid grid-cols-4 gap-2">
+              {[
+                ["Total", counts.total],
+                ["Queued", counts.queued],
+                ["Delivered", counts.delivered],
+                ["Failed", counts.failed],
+              ].map(([label, value]) => (
+                <div className="rounded-md border border-white/10 bg-white/[0.04] p-3 text-center" key={label}>
+                  <p className="text-lg font-bold">{value}</p>
+                  <p className="text-[10px] uppercase tracking-[0.12em] text-white/40">{label}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                className={`h-11 rounded-md text-sm font-bold ${
+                  statusFilter === "all" ? "bg-white text-black" : "border border-white/10 text-white/60"
+                }`}
+                onClick={() => setStatusFilter("all")}
+                type="button"
+              >
+                All
+              </button>
+              <button
+                className={`h-11 rounded-md text-sm font-bold ${
+                  statusFilter === "failed" ? "bg-[#ff6b8a] text-black" : "border border-white/10 text-white/60"
+                }`}
+                onClick={() => setStatusFilter("failed")}
+                type="button"
+              >
+                Failed
+              </button>
+            </div>
+
+            <button
+              className="h-12 rounded-md bg-[#ff6b8a] text-sm font-black text-black disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={sendState === "sending" || failedContacts.length === 0}
+              onClick={resendFailed}
+              type="button"
+            >
+              Resend to All Failed
+            </button>
+
+            <div className="rounded-md border border-white/10 bg-black/25 px-4 py-3 text-xs leading-5 text-white/50">
+              Read status is marked unavailable because carrier SMS normally confirms delivery, not whether someone opened the message.
+            </div>
+
+            <div className="grid gap-2 pb-16">
+              {visibleResults.length === 0 ? (
+                <div className="rounded-lg border border-white/10 bg-white/[0.04] px-4 py-8 text-center text-sm text-white/45">
+                  No tracking records yet.
+                </div>
+              ) : (
+                visibleResults.map((result) => (
+                  <article
+                    className="rounded-md border border-white/10 bg-white/[0.04] px-4 py-3"
+                    key={result.id}
+                  >
+                    <div className="mb-3 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold">{result.name}</p>
+                        <p className="truncate text-sm text-white/50">{result.phone}</p>
+                      </div>
+                      <span
+                        className={`shrink-0 rounded-full border px-3 py-1 text-xs font-bold capitalize ${statusTone(
+                          result.status,
+                        )}`}
+                      >
+                        {result.status}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-xs text-white/45">
+                      <span>Read: unavailable for SMS</span>
+                      <span>{result.error ?? result.providerId ?? "provider pending"}</span>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
+          </div>
+        ) : null}
       </section>
     </main>
   );
